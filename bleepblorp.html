@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BleepBlorp - Windows 98 Style Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: "MS Sans Serif", sans-serif;
+            overflow: hidden;
+        }
+        
+        #root {
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- React and ReactDOM from CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Firebase from CDN -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+
+    <script type="text/babel" data-type="module">
+        const { useState, useEffect, useRef } = React;
+
+        // Firebase config
+        const firebaseConfig = {
+            apiKey: "AIzaSyBkfrF1WT_l4YxR53EhlQQ-aqUxU_Dn0bw",
+            authDomain: "bleepblorp-fade4.firebaseapp.com",
+            projectId: "bleepblorp-fade4",
+            storageBucket: "bleepblorp-fade4.firebasestorage.app",
+            messagingSenderId: "723558764239",
+            appId: "1:723558764239:web:ec46a69ce53c2e39b171ba",
+            measurementId: "G-1ZB9Z316C8",
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+
+        const BleepBlorp = () => {
+            const [username, setUsername] = useState("");
+            const [isLoggedIn, setIsLoggedIn] = useState(false);
+            const [userId, setUserId] = useState("");
+            const [authUser, setAuthUser] = useState(null);
+            const [messages, setMessages] = useState([]);
+            const [currentMessage, setCurrentMessage] = useState("");
+            const [onlineUsers, setOnlineUsers] = useState([]);
+            const [friends, setFriends] = useState([]);
+            const [sentRequests, setSentRequests] = useState([]);
+            const [receivedRequests, setReceivedRequests] = useState([]);
+            const [buddyListOpen, setBuddyListOpen] = useState(true);
+            const [chatOpen, setChatOpen] = useState(true);
+            const [currentTime, setCurrentTime] = useState(new Date().toLocaleTimeString());
+            const [pmWindows, setPmWindows] = useState({});
+            const [pmListeners, setPmListeners] = useState({});
+            const chatScrollRef = useRef(null);
+            const pmScrollRefs = useRef({});
+
+            // Update clock every second
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    setCurrentTime(new Date().toLocaleTimeString());
+                }, 1000);
+                return () => clearInterval(timer);
+            }, []);
+
+            // Listen for auth state changes
+            useEffect(() => {
+                const unsubscribe = auth.onAuthStateChanged((user) => {
+                    if (user) {
+                        setAuthUser(user);
+                        setUserId(user.uid);
+                    } else {
+                        setAuthUser(null);
+                        setUserId("");
+                        setIsLoggedIn(false);
+                    }
+                });
+
+                return () => unsubscribe();
+            }, []);
+
+            // Auto-scroll chat to bottom
+            useEffect(() => {
+                if (chatScrollRef.current) {
+                    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+                }
+            }, [messages]);
+
+            // Auto-scroll PM windows to bottom
+            useEffect(() => {
+                Object.keys(pmWindows).forEach((user) => {
+                    if (pmScrollRefs.current[user]) {
+                        pmScrollRefs.current[user].scrollTop = pmScrollRefs.current[user].scrollHeight;
+                    }
+                });
+            }, [pmWindows]);
+
+            // Handle login and set up presence
+            const handleLogin = async (e) => {
+                e.preventDefault();
+                if (username.trim()) {
+                    try {
+                        const userCredential = await auth.signInAnonymously();
+                        const user = userCredential.user;
+
+                        setIsLoggedIn(true);
+
+                        await db.collection("users").doc(user.uid).set({
+                            userId: user.uid,
+                            username: username,
+                            online: true,
+                            lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
+                        });
+
+                        await db.collection("messages").add({
+                            userId: user.uid,
+                            user: "SYSTEM",
+                            text: `*** ${username} has entered BleepBlorp ***`,
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                            isSystem: true,
+                        });
+                    } catch (error) {
+                        console.error("Error logging in:", error);
+                        alert("Login failed: " + error.message);
+                    }
+                }
+            };
+
+            // Listen for online users
+            useEffect(() => {
+                if (!isLoggedIn || !authUser) return;
+
+                const unsubscribe = db.collection("users").onSnapshot((snapshot) => {
+                    const users = snapshot.docs
+                        .map((doc) => ({ id: doc.id, ...doc.data() }))
+                        .filter((user) => user.online)
+                        .map((user) => ({ username: user.username, userId: user.userId }));
+                    setOnlineUsers(users.map((u) => u.username));
+                });
+
+                return () => unsubscribe();
+            }, [isLoggedIn, authUser]);
+
+            // Listen for messages
+            useEffect(() => {
+                if (!isLoggedIn) return;
+
+                const unsubscribe = db.collection("messages")
+                    .orderBy("timestamp", "asc")
+                    .onSnapshot((snapshot) => {
+                        const msgs = snapshot.docs.map((doc) => {
+                            const data = doc.data();
+                            return {
+                                id: doc.id,
+                                user: data.user,
+                                text: data.text,
+                                time: data.timestamp?.toDate().toLocaleTimeString() || new Date().toLocaleTimeString(),
+                                isSystem: data.isSystem || false,
+                            };
+                        });
+                        setMessages(msgs);
+                    });
+
+                return () => unsubscribe();
+            }, [isLoggedIn]);
+
+            // Listen for friend requests
+            useEffect(() => {
+                if (!isLoggedIn || !userId) return;
+
+                const unsubReceived = db.collection("friendRequests")
+                    .where("toId", "==", userId)
+                    .where("status", "==", "pending")
+                    .onSnapshot((snapshot) => {
+                        const requests = snapshot.docs.map((doc) => doc.data().from);
+                        setReceivedRequests(requests);
+                    });
+
+                const unsubSent = db.collection("friendRequests")
+                    .where("fromId", "==", userId)
+                    .where("status", "==", "pending")
+                    .onSnapshot((snapshot) => {
+                        const requests = snapshot.docs.map((doc) => doc.data().to);
+                        setSentRequests(requests);
+                    });
+
+                return () => {
+                    unsubReceived();
+                    unsubSent();
+                };
+            }, [isLoggedIn, userId]);
+
+            // Listen for friends
+            useEffect(() => {
+                if (!isLoggedIn || !userId) return;
+
+                const unsubscribe = db.collection("friendships")
+                    .where("userIds", "array-contains", userId)
+                    .onSnapshot((snapshot) => {
+                        const friendsList = new Set();
+                        snapshot.docs.forEach((doc) => {
+                            const data = doc.data();
+                            data.users.forEach((user) => {
+                                if (user !== username) friendsList.add(user);
+                            });
+                        });
+                        setFriends(Array.from(friendsList));
+                    });
+
+                return () => unsubscribe();
+            }, [isLoggedIn, userId, username]);
+
+            // Clean up on logout/unmount
+            useEffect(() => {
+                if (!isLoggedIn || !authUser) return;
+
+                const cleanup = async () => {
+                    try {
+                        await db.collection("users").doc(authUser.uid).update({
+                            online: false,
+                            lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
+                        });
+
+                        await db.collection("messages").add({
+                            userId: authUser.uid,
+                            user: "SYSTEM",
+                            text: `*** ${username} has left BleepBlorp ***`,
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                            isSystem: true,
+                        });
+                    } catch (error) {
+                        console.error("Error during cleanup:", error);
+                    }
+                };
+
+                window.addEventListener("beforeunload", cleanup);
+
+                return () => {
+                    window.removeEventListener("beforeunload", cleanup);
+                    cleanup();
+                };
+            }, [isLoggedIn, authUser, username]);
+
+            const handleSendMessage = async (e) => {
+                e.preventDefault();
+                if (currentMessage.trim() && authUser) {
+                    try {
+                        await db.collection("messages").add({
+                            userId: authUser.uid,
+                            user: username,
+                            text: currentMessage,
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                            isSystem: false,
+                        });
+                        setCurrentMessage("");
+                    } catch (error) {
+                        console.error("Error sending message:", error);
+                    }
+                }
+            };
+
+            const getUserIdByUsername = async (targetUsername) => {
+                try {
+                    const snapshot = await db.collection("users")
+                        .where("username", "==", targetUsername)
+                        .get();
+                    
+                    if (!snapshot.empty) {
+                        return snapshot.docs[0].id;
+                    }
+                    return null;
+                } catch (error) {
+                    console.error("Error finding user:", error);
+                    return null;
+                }
+            };
+
+            const sendFriendRequest = async (targetUsername) => {
+                if (!authUser || !userId) {
+                    alert("You must be logged in to send friend requests.");
+                    return;
+                }
+
+                if (targetUsername === username) {
+                    alert("You can't add yourself as a friend!");
+                    return;
+                }
+
+                if (friends.includes(targetUsername)) {
+                    alert(`${targetUsername} is already your friend!`);
+                    return;
+                }
+
+                if (sentRequests.includes(targetUsername)) {
+                    alert(`You've already sent a friend request to ${targetUsername}.`);
+                    return;
+                }
+
+                const targetUserId = await getUserIdByUsername(targetUsername);
+                if (!targetUserId) {
+                    alert(`User ${targetUsername} not found.`);
+                    return;
+                }
+
+                const existingRequestSnapshot = await db.collection("friendRequests")
+                    .where("fromId", "==", targetUserId)
+                    .where("toId", "==", userId)
+                    .where("status", "==", "pending")
+                    .get();
+
+                if (!existingRequestSnapshot.empty) {
+                    alert(`${targetUsername} has already sent you a friend request! Check your Received Requests.`);
+                    return;
+                }
+
+                try {
+                    await db.collection("friendRequests").add({
+                        from: username,
+                        fromId: userId,
+                        to: targetUsername,
+                        toId: targetUserId,
+                        status: "pending",
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                    alert(`Friend request sent to ${targetUsername}!`);
+                } catch (error) {
+                    console.error("Error sending friend request:", error);
+                    alert("Failed to send friend request. Try again.");
+                }
+            };
+
+            const acceptFriendRequest = async (fromUsername) => {
+                if (!authUser || !userId) return;
+
+                const fromUserId = await getUserIdByUsername(fromUsername);
+                if (!fromUserId) return;
+
+                try {
+                    const requestSnapshot = await db.collection("friendRequests")
+                        .where("fromId", "==", fromUserId)
+                        .where("toId", "==", userId)
+                        .where("status", "==", "pending")
+                        .get();
+
+                    if (!requestSnapshot.empty) {
+                        const requestDoc = requestSnapshot.docs[0];
+                        await requestDoc.ref.update({ status: "accepted" });
+
+                        await db.collection("friendships").add({
+                            users: [username, fromUsername],
+                            userIds: [userId, fromUserId],
+                            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                        });
+
+                        alert(`You are now friends with ${fromUsername}!`);
+                    }
+                } catch (error) {
+                    console.error("Error accepting friend request:", error);
+                }
+            };
+
+            const declineFriendRequest = async (fromUsername) => {
+                if (!authUser || !userId) return;
+
+                const fromUserId = await getUserIdByUsername(fromUsername);
+                if (!fromUserId) return;
+
+                try {
+                    const requestSnapshot = await db.collection("friendRequests")
+                        .where("fromId", "==", fromUserId)
+                        .where("toId", "==", userId)
+                        .where("status", "==", "pending")
+                        .get();
+
+                    if (!requestSnapshot.empty) {
+                        const requestDoc = requestSnapshot.docs[0];
+                        await requestDoc.ref.delete();
+                        alert(`Friend request from ${fromUsername} declined.`);
+                    }
+                } catch (error) {
+                    console.error("Error declining friend request:", error);
+                }
+            };
+
+            const openPMWindow = async (targetUsername) => {
+                if (pmWindows[targetUsername]) {
+                    setPmWindows((prev) => ({
+                        ...prev,
+                        [targetUsername]: { ...prev[targetUsername], isOpen: true },
+                    }));
+                    return;
+                }
+
+                const targetUserId = await getUserIdByUsername(targetUsername);
+                if (!targetUserId) {
+                    alert(`User ${targetUsername} not found.`);
+                    return;
+                }
+
+                const conversationId = [userId, targetUserId].sort().join("_");
+
+                if (pmListeners[conversationId]) {
+                    pmListeners[conversationId]();
+                }
+
+                const unsubscribe = db.collection("privateMessages")
+                    .doc(conversationId)
+                    .collection("messages")
+                    .orderBy("timestamp", "asc")
+                    .onSnapshot((snapshot) => {
+                        const msgs = snapshot.docs.map((doc) => {
+                            const data = doc.data();
+                            return {
+                                id: doc.id,
+                                user: data.fromUsername,
+                                text: data.text,
+                                time: data.timestamp?.toDate().toLocaleTimeString() || new Date().toLocaleTimeString(),
+                                isSystem: false,
+                            };
+                        });
+
+                        setPmWindows((prev) => ({
+                            ...prev,
+                            [targetUsername]: {
+                                ...prev[targetUsername],
+                                messages: msgs,
+                                isOpen: true,
+                                input: prev[targetUsername]?.input || "",
+                            },
+                        }));
+                    });
+
+                setPmListeners((prev) => ({
+                    ...prev,
+                    [conversationId]: unsubscribe,
+                }));
+
+                setPmWindows((prev) => ({
+                    ...prev,
+                    [targetUsername]: {
+                        messages: [],
+                        isOpen: true,
+                        input: "",
+                        targetUserId,
+                        conversationId,
+                    },
+                }));
+            };
+
+            const closePMWindow = (targetUsername) => {
+                setPmWindows((prev) => ({
+                    ...prev,
+                    [targetUsername]: { ...prev[targetUsername], isOpen: false },
+                }));
+
+                const conversationId = pmWindows[targetUsername]?.conversationId;
+                if (conversationId && pmListeners[conversationId]) {
+                    pmListeners[conversationId]();
+                    setPmListeners((prev) => {
+                        const newListeners = { ...prev };
+                        delete newListeners[conversationId];
+                        return newListeners;
+                    });
+                }
+            };
+
+            const sendPMMessage = async (targetUsername, e) => {
+                e.preventDefault();
+                const pmData = pmWindows[targetUsername];
+                if (!pmData || !pmData.input.trim() || !authUser) return;
+
+                try {
+                    await db.collection("privateMessages")
+                        .doc(pmData.conversationId)
+                        .collection("messages")
+                        .add({
+                            fromId: userId,
+                            fromUsername: username,
+                            toId: pmData.targetUserId,
+                            toUsername: targetUsername,
+                            text: pmData.input,
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                        });
+
+                    setPmWindows((prev) => ({
+                        ...prev,
+                        [targetUsername]: { ...prev[targetUsername], input: "" },
+                    }));
+                } catch (error) {
+                    console.error("Error sending PM:", error);
+                }
+            };
+
+            const handlePMInput = (targetUsername, value) => {
+                setPmWindows((prev) => ({
+                    ...prev,
+                    [targetUsername]: { ...prev[targetUsername], input: value },
+                }));
+            };
+
+            if (!isLoggedIn) {
+                return (
+                    <div style={{
+                        width: "100vw",
+                        height: "100vh",
+                        background: "#008080",
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        fontFamily: '"MS Sans Serif", sans-serif',
+                    }}>
+                        <div style={{
+                            background: "#c0c0c0",
+                            border: "2px outset #dfdfdf",
+                            padding: "20px",
+                            boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                            width: "400px",
+                        }}>
+                            <div style={{
+                                background: "linear-gradient(to right, #000080, #1084d0)",
+                                color: "white",
+                                padding: "3px 5px",
+                                marginBottom: "15px",
+                                fontWeight: "bold",
+                                fontSize: "11px",
+                            }}>
+                                Welcome to BleepBlorp
+                            </div>
+
+                            <form onSubmit={handleLogin} style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "15px",
+                            }}>
+                                <div>
+                                    <label style={{
+                                        display: "block",
+                                        marginBottom: "5px",
+                                        fontSize: "11px",
+                                    }}>
+                                        Screen Name:
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        style={{
+                                            width: "100%",
+                                            padding: "4px",
+                                            border: "2px inset #dfdfdf",
+                                            fontFamily: '"MS Sans Serif", sans-serif',
+                                            fontSize: "11px",
+                                        }}
+                                        autoFocus
+                                    />
+                                </div>
+
+                                <button
+                                    type="submit"
+                                    style={{
+                                        background: "#c0c0c0",
+                                        border: "2px outset #dfdfdf",
+                                        padding: "6px 16px",
+                                        fontFamily: '"MS Sans Serif", sans-serif',
+                                        fontSize: "11px",
+                                        cursor: "pointer",
+                                        fontWeight: "bold",
+                                    }}
+                                >
+                                    Sign On
+                                </button>
+                            </form>
+
+                            <div style={{
+                                marginTop: "15px",
+                                fontSize: "10px",
+                                color: "#666",
+                                textAlign: "center",
+                            }}>
+                                Enter the chat room and start messaging!
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div style={{
+                    width: "100vw",
+                    height: "100vh",
+                    background: "#008080",
+                    position: "relative",
+                    overflow: "hidden",
+                    fontFamily: '"MS Sans Serif", sans-serif',
+                }}>
+                    {buddyListOpen && (
+                        <div style={{
+                            position: "absolute",
+                            top: "50px",
+                            left: "50px",
+                            width: "250px",
+                            background: "#c0c0c0",
+                            border: "2px outset #dfdfdf",
+                            display: "flex",
+                            flexDirection: "column",
+                            boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                            maxHeight: "calc(100vh - 100px)",
+                        }}>
+                            <div style={{
+                                background: "linear-gradient(to right, #000080, #1084d0)",
+                                color: "white",
+                                padding: "3px 5px",
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                fontWeight: "bold",
+                                fontSize: "11px",
+                            }}>
+                                <span>👥 Buddy List</span>
+                                <div>
+                                    <span style={{ cursor: "pointer", marginRight: "8px" }}>_</span>
+                                    <span
+                                        style={{ cursor: "pointer", fontSize: "16px" }}
+                                        onClick={() => setBuddyListOpen(false)}
+                                    >
+                                        ✕
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                background: "#c0c0c0",
+                                padding: "8px",
+                                overflowY: "auto",
+                                fontSize: "11px",
+                            }}>
+                                <div style={{
+                                    marginBottom: "10px",
+                                    padding: "5px",
+                                    background: "white",
+                                    border: "2px inset #dfdfdf",
+                                }}>
+                                    <strong>Your Screen Name:</strong>
+                                    <div style={{ color: "#cc0000", marginTop: "2px" }}>{username}</div>
+                                </div>
+
+                                <div style={{
+                                    marginBottom: "10px",
+                                    padding: "5px",
+                                    background: "white",
+                                    border: "2px inset #dfdfdf",
+                                }}>
+                                    <strong>🟢 Friends ({friends.length})</strong>
+                                    {friends.length === 0 ? (
+                                        <div style={{ color: "#999", marginTop: "5px", fontSize: "10px" }}>
+                                            No friends yet
+                                        </div>
+                                    ) : (
+                                        friends.map((friend) => (
+                                            <div
+                                                key={friend}
+                                                style={{
+                                                    padding: "3px",
+                                                    marginTop: "3px",
+                                                    cursor: "pointer",
+                                                    display: "flex",
+                                                    justifyContent: "space-between",
+                                                    alignItems: "center",
+                                                }}
+                                            >
+                                                <span style={{ color: onlineUsers.includes(friend) ? "#0000cc" : "#999" }}>
+                                                    {onlineUsers.includes(friend) ? "🟢" : "⚫"} {friend}
+                                                </span>
+                                                <button
+                                                    onClick={() => openPMWindow(friend)}
+                                                    style={{
+                                                        background: "#c0c0c0",
+                                                        border: "1px outset #dfdfdf",
+                                                        padding: "2px 6px",
+                                                        fontSize: "9px",
+                                                        cursor: "pointer",
+                                                    }}
+                                                >
+                                                    MSG
+                                                </button>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+
+                                <div style={{
+                                    marginBottom: "10px",
+                                    padding: "5px",
+                                    background: "white",
+                                    border: "2px inset #dfdfdf",
+                                }}>
+                                    <strong>📨 Received Requests ({receivedRequests.length})</strong>
+                                    {receivedRequests.length === 0 ? (
+                                        <div style={{ color: "#999", marginTop: "5px", fontSize: "10px" }}>
+                                            No pending requests
+                                        </div>
+                                    ) : (
+                                        receivedRequests.map((from) => (
+                                            <div key={from} style={{ marginTop: "5px", padding: "3px" }}>
+                                                <div style={{ color: "#0000cc", marginBottom: "3px" }}>{from}</div>
+                                                <div style={{ display: "flex", gap: "3px" }}>
+                                                    <button
+                                                        onClick={() => acceptFriendRequest(from)}
+                                                        style={{
+                                                            background: "#c0c0c0",
+                                                            border: "1px outset #dfdfdf",
+                                                            padding: "2px 6px",
+                                                            fontSize: "9px",
+                                                            cursor: "pointer",
+                                                        }}
+                                                    >
+                                                        Accept
+                                                    </button>
+                                                    <button
+                                                        onClick={() => declineFriendRequest(from)}
+                                                        style={{
+                                                            background: "#c0c0c0",
+                                                            border: "1px outset #dfdfdf",
+                                                            padding: "2px 6px",
+                                                            fontSize: "9px",
+                                                            cursor: "pointer",
+                                                        }}
+                                                    >
+                                                        Decline
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+
+                                <div style={{
+                                    marginBottom: "10px",
+                                    padding: "5px",
+                                    background: "white",
+                                    border: "2px inset #dfdfdf",
+                                }}>
+                                    <strong>📤 Sent Requests ({sentRequests.length})</strong>
+                                    {sentRequests.length === 0 ? (
+                                        <div style={{ color: "#999", marginTop: "5px", fontSize: "10px" }}>
+                                            No sent requests
+                                        </div>
+                                    ) : (
+                                        sentRequests.map((to) => (
+                                            <div key={to} style={{ padding: "3px", marginTop: "3px", color: "#666" }}>
+                                                Pending: {to}
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+
+                                <div style={{
+                                    padding: "5px",
+                                    background: "white",
+                                    border: "2px inset #dfdfdf",
+                                }}>
+                                    <strong>➕ Add Friend</strong>
+                                    <div style={{ marginTop: "5px" }}>
+                                        <input
+                                            type="text"
+                                            id="addFriendInput"
+                                            placeholder="Screen name..."
+                                            style={{
+                                                width: "100%",
+                                                padding: "3px",
+                                                border: "1px inset #dfdfdf",
+                                                fontSize: "10px",
+                                                marginBottom: "3px",
+                                            }}
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                const input = document.getElementById("addFriendInput");
+                                                sendFriendRequest(input.value);
+                                                input.value = "";
+                                            }}
+                                            style={{
+                                                background: "#c0c0c0",
+                                                border: "1px outset #dfdfdf",
+                                                padding: "3px 8px",
+                                                fontSize: "10px",
+                                                cursor: "pointer",
+                                                width: "100%",
+                                            }}
+                                        >
+                                            Send Request
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div style={{
+                                    marginTop: "10px",
+                                    padding: "5px",
+                                    background: "white",
+                                    border: "2px inset #dfdfdf",
+                                }}>
+                                    <strong>🌐 Online Users ({onlineUsers.length})</strong>
+                                    <div style={{
+                                        maxHeight: "150px",
+                                        overflowY: "auto",
+                                        marginTop: "5px",
+                                    }}>
+                                        {onlineUsers.map((user) => (
+                                            <div
+                                                key={user}
+                                                style={{
+                                                    padding: "3px",
+                                                    color: user === username ? "#cc0000" : "#0000cc",
+                                                }}
+                                            >
+                                                🟢 {user}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {chatOpen && (
+                        <div style={{
+                            position: "absolute",
+                            top: "50px",
+                            right: "50px",
+                            width: "500px",
+                            height: "500px",
+                            background: "#c0c0c0",
+                            border: "2px outset #dfdfdf",
+                            display: "flex",
+                            flexDirection: "column",
+                            boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                        }}>
+                            <div style={{
+                                background: "linear-gradient(to right, #000080, #1084d0)",
+                                color: "white",
+                                padding: "3px 5px",
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                fontWeight: "bold",
+                                fontSize: "11px",
+                            }}>
+                                <span>💬 BleepBlorp Chat Room</span>
+                                <div>
+                                    <span style={{ cursor: "pointer", marginRight: "8px" }}>_</span>
+                                    <span
+                                        style={{ cursor: "pointer", fontSize: "16px" }}
+                                        onClick={() => setChatOpen(false)}
+                                    >
+                                        ✕
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                background: "#c0c0c0",
+                                padding: "8px",
+                                height: "calc(100% - 26px)",
+                            }}>
+                                <div
+                                    ref={chatScrollRef}
+                                    style={{
+                                        background: "white",
+                                        border: "2px inset #dfdfdf",
+                                        padding: "8px",
+                                        overflowY: "auto",
+                                        fontSize: "11px",
+                                        marginBottom: "8px",
+                                        fontFamily: '"Courier New", monospace',
+                                        height: "400px",
+                                        maxHeight: "400px",
+                                    }}
+                                >
+                                    {messages.map((msg, i) => (
+                                        <div key={msg.id || i} style={{ marginBottom: "8px" }}>
+                                            {msg.isSystem ? (
+                                                <div style={{
+                                                    color: "#666",
+                                                    fontStyle: "italic",
+                                                    textAlign: "center",
+                                                }}>
+                                                    {msg.text}
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    <div style={{
+                                                        display: "flex",
+                                                        alignItems: "baseline",
+                                                        gap: "8px",
+                                                    }}>
+                                                        <span style={{
+                                                            fontWeight: "bold",
+                                                            color: msg.user === username ? "#cc0000" : "#0000cc",
+                                                        }}>
+                                                            {msg.user}:
+                                                        </span>
+                                                        <span style={{ fontSize: "9px", color: "#999" }}>
+                                                            {msg.time}
+                                                        </span>
+                                                    </div>
+                                                    <div style={{ marginLeft: "8px", marginTop: "2px" }}>
+                                                        {msg.text}
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+
+                                <form
+                                    onSubmit={handleSendMessage}
+                                    style={{ display: "flex", gap: "5px" }}
+                                >
+                                    <input
+                                        type="text"
+                                        value={currentMessage}
+                                        onChange={(e) => setCurrentMessage(e.target.value)}
+                                        style={{
+                                            flex: 1,
+                                            padding: "4px",
+                                            border: "2px inset #dfdfdf",
+                                            fontFamily: '"MS Sans Serif", sans-serif',
+                                            fontSize: "11px",
+                                            background: "white",
+                                        }}
+                                        placeholder="Type a message..."
+                                    />
+                                    <button
+                                        type="submit"
+                                        style={{
+                                            background: "#c0c0c0",
+                                            border: "2px outset #dfdfdf",
+                                            padding: "4px 16px",
+                                            fontFamily: '"MS Sans Serif", sans-serif',
+                                            fontSize: "11px",
+                                            cursor: "pointer",
+                                            fontWeight: "bold",
+                                        }}
+                                    >
+                                        Send
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {Object.entries(pmWindows).map(([user, pmData], index) => {
+                        if (!pmData.isOpen) return null;
+
+                        return (
+                            <div
+                                key={user}
+                                style={{
+                                    position: "absolute",
+                                    top: `${80 + index * 40}px`,
+                                    left: `${300 + index * 40}px`,
+                                    width: "400px",
+                                    height: "400px",
+                                    background: "#c0c0c0",
+                                    border: "2px outset #dfdfdf",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                                    zIndex: 100 + index,
+                                }}
+                            >
+                                <div style={{
+                                    background: "linear-gradient(to right, #000080, #1084d0)",
+                                    color: "white",
+                                    padding: "3px 5px",
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    fontWeight: "bold",
+                                    fontSize: "11px",
+                                    cursor: "move",
+                                }}>
+                                    <span>💬 Message with {user}</span>
+                                    <div>
+                                        <span style={{ cursor: "pointer", marginRight: "8px" }}>_</span>
+                                        <span
+                                            style={{ cursor: "pointer", fontSize: "16px" }}
+                                            onClick={() => closePMWindow(user)}
+                                        >
+                                            ✕
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    background: "#c0c0c0",
+                                    padding: "8px",
+                                    height: "calc(100% - 26px)",
+                                }}>
+                                    <div
+                                        ref={(el) => (pmScrollRefs.current[user] = el)}
+                                        style={{
+                                            background: "white",
+                                            border: "2px inset #dfdfdf",
+                                            padding: "8px",
+                                            overflowY: "auto",
+                                            fontSize: "11px",
+                                            marginBottom: "8px",
+                                            fontFamily: '"Courier New", monospace',
+                                            height: "280px",
+                                            maxHeight: "280px",
+                                        }}
+                                    >
+                                        {pmData.messages.map((msg, i) => (
+                                            <div key={i} style={{ marginBottom: "8px" }}>
+                                                {msg.isSystem ? (
+                                                    <div style={{
+                                                        color: "#666",
+                                                        fontStyle: "italic",
+                                                        textAlign: "center",
+                                                    }}>
+                                                        {msg.text}
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        <div style={{
+                                                            display: "flex",
+                                                            alignItems: "baseline",
+                                                            gap: "8px",
+                                                        }}>
+                                                            <span style={{
+                                                                fontWeight: "bold",
+                                                                color: msg.user === username ? "#cc0000" : "#0000cc",
+                                                            }}>
+                                                                {msg.user}:
+                                                            </span>
+                                                            <span style={{ fontSize: "9px", color: "#999" }}>
+                                                                {msg.time}
+                                                            </span>
+                                                        </div>
+                                                        <div style={{ marginLeft: "8px", marginTop: "2px" }}>
+                                                            {msg.text}
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <form
+                                        onSubmit={(e) => sendPMMessage(user, e)}
+                                        style={{ display: "flex", gap: "5px" }}
+                                    >
+                                        <input
+                                            type="text"
+                                            value={pmData.input}
+                                            onChange={(e) => handlePMInput(user, e.target.value)}
+                                            style={{
+                                                flex: 1,
+                                                padding: "4px",
+                                                border: "2px inset #dfdfdf",
+                                                fontFamily: '"MS Sans Serif", sans-serif',
+                                                fontSize: "11px",
+                                                background: "white",
+                                            }}
+                                            placeholder="Type a message..."
+                                        />
+                                        <button
+                                            type="submit"
+                                            style={{
+                                                background: "#c0c0c0",
+                                                border: "2px outset #dfdfdf",
+                                                padding: "4px 16px",
+                                                fontFamily: '"MS Sans Serif", sans-serif',
+                                                fontSize: "11px",
+                                                cursor: "pointer",
+                                                fontWeight: "bold",
+                                            }}
+                                        >
+                                            Send
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
+                        );
+                    })}
+
+                    {/* Taskbar */}
+                    <div style={{
+                        position: "absolute",
+                        bottom: "0",
+                        left: "0",
+                        right: "0",
+                        background: "#c0c0c0",
+                        border: "2px outset #dfdfdf",
+                        borderBottom: "none",
+                        padding: "3px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        fontSize: "11px",
+                        alignItems: "center",
+                    }}>
+                        <button style={{
+                            background: "#c0c0c0",
+                            border: "2px outset #dfdfdf",
+                            padding: "3px 8px",
+                            fontFamily: '"MS Sans Serif", sans-serif',
+                            fontSize: "11px",
+                            cursor: "pointer",
+                            fontWeight: "bold",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "5px",
+                        }}>
+                            <span style={{ fontSize: "14px" }}>🪟</span>
+                            Start
+                        </button>
+
+                        <div style={{
+                            display: "flex",
+                            gap: "5px",
+                            alignItems: "center",
+                        }}>
+                            {!buddyListOpen && (
+                                <button
+                                    onClick={() => setBuddyListOpen(true)}
+                                    style={{
+                                        background: "#c0c0c0",
+                                        border: "2px outset #dfdfdf",
+                                        padding: "3px 8px",
+                                        fontSize: "11px",
+                                        cursor: "pointer",
+                                    }}
+                                >
+                                    👥 Buddy List
+                                </button>
+                            )}
+
+                            {!chatOpen && (
+                                <button
+                                    onClick={() => setChatOpen(true)}
+                                    style={{
+                                        background: "#c0c0c0",
+                                        border: "2px outset #dfdfdf",
+                                        padding: "3px 8px",
+                                        fontSize: "11px",
+                                        cursor: "pointer",
+                                    }}
+                                >
+                                    💬 BleepBlorp
+                                </button>
+                            )}
+
+                            {Object.entries(pmWindows).map(([user, pmData]) =>
+                                pmData.isOpen && (
+                                    <button
+                                        key={user}
+                                        style={{
+                                            background: "#c0c0c0",
+                                            border: "2px inset #dfdfdf",
+                                            padding: "3px 8px",
+                                            fontSize: "11px",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        💬 {user}
+                                    </button>
+                                )
+                            )}
+
+                            <div style={{
+                                border: "2px inset #dfdfdf",
+                                padding: "3px 8px",
+                                background: "#c0c0c0",
+                                minWidth: "100px",
+                                textAlign: "center",
+                            }}>
+                                {currentTime}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<BleepBlorp />);
+    </script>
+    
+    <!-- Babel Standalone for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</body>
+</html>
