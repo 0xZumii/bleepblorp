@@ -54,7 +54,7 @@
         const auth = firebase.auth();
 
         const BleepBlorp = () => {
-            const [username, setUsername] = useState("");
+            const [username, setUsername] = useState(localStorage.getItem('bleepblorp_username') || "");
             const [isLoggedIn, setIsLoggedIn] = useState(false);
             const [userId, setUserId] = useState("");
             const [authUser, setAuthUser] = useState(null);
@@ -71,6 +71,22 @@
             const [pmListeners, setPmListeners] = useState({});
             const chatScrollRef = useRef(null);
             const pmScrollRefs = useRef({});
+            
+            // Window positions and sizes
+            const [buddyListPos, setBuddyListPos] = useState({ x: 50, y: 50 });
+            const [buddyListSize, setBuddyListSize] = useState({ width: 250, height: 600 });
+            const [chatPos, setChatPos] = useState({ x: window.innerWidth - 550, y: 50 });
+            const [chatSize, setChatSize] = useState({ width: 500, height: 500 });
+            const [pmWindowPositions, setPmWindowPositions] = useState({});
+            const [pmWindowSizes, setPmWindowSizes] = useState({});
+            
+            // Dragging state
+            const [dragging, setDragging] = useState(null);
+            const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+            
+            // Resizing state
+            const [resizing, setResizing] = useState(null);
+            const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
 
             // Update clock every second
             useEffect(() => {
@@ -79,6 +95,148 @@
                 }, 1000);
                 return () => clearInterval(timer);
             }, []);
+
+            // Handle dragging
+            useEffect(() => {
+                const handleMouseMove = (e) => {
+                    if (dragging) {
+                        const newX = e.clientX - dragOffset.x;
+                        const newY = e.clientY - dragOffset.y;
+                        
+                        if (dragging.type === 'buddyList') {
+                            setBuddyListPos({ x: Math.max(0, newX), y: Math.max(0, newY) });
+                        } else if (dragging.type === 'chat') {
+                            setChatPos({ x: Math.max(0, newX), y: Math.max(0, newY) });
+                        } else if (dragging.type === 'pm') {
+                            setPmWindowPositions(prev => ({
+                                ...prev,
+                                [dragging.user]: { x: Math.max(0, newX), y: Math.max(0, newY) }
+                            }));
+                        }
+                    }
+                };
+
+                const handleMouseUp = () => {
+                    setDragging(null);
+                };
+
+                if (dragging) {
+                    window.addEventListener('mousemove', handleMouseMove);
+                    window.addEventListener('mouseup', handleMouseUp);
+                }
+
+                return () => {
+                    window.removeEventListener('mousemove', handleMouseMove);
+                    window.removeEventListener('mouseup', handleMouseUp);
+                };
+            }, [dragging, dragOffset]);
+
+            // Handle resizing
+            useEffect(() => {
+                const handleMouseMove = (e) => {
+                    if (resizing) {
+                        const deltaX = e.clientX - resizeStart.x;
+                        const deltaY = e.clientY - resizeStart.y;
+                        
+                        let newWidth = resizeStart.width;
+                        let newHeight = resizeStart.height;
+                        
+                        if (resizing.direction.includes('e')) {
+                            newWidth = Math.max(300, resizeStart.width + deltaX);
+                        }
+                        if (resizing.direction.includes('s')) {
+                            newHeight = Math.max(200, resizeStart.height + deltaY);
+                        }
+                        if (resizing.direction.includes('w')) {
+                            const newW = Math.max(300, resizeStart.width - deltaX);
+                            if (newW >= 300) {
+                                newWidth = newW;
+                            }
+                        }
+                        if (resizing.direction.includes('n')) {
+                            const newH = Math.max(200, resizeStart.height - deltaY);
+                            if (newH >= 200) {
+                                newHeight = newH;
+                            }
+                        }
+                        
+                        if (resizing.type === 'buddyList') {
+                            setBuddyListSize({ width: newWidth, height: newHeight });
+                        } else if (resizing.type === 'chat') {
+                            setChatSize({ width: newWidth, height: newHeight });
+                        } else if (resizing.type === 'pm') {
+                            setPmWindowSizes(prev => ({
+                                ...prev,
+                                [resizing.user]: { width: newWidth, height: newHeight }
+                            }));
+                        }
+                    }
+                };
+
+                const handleMouseUp = () => {
+                    setResizing(null);
+                };
+
+                if (resizing) {
+                    window.addEventListener('mousemove', handleMouseMove);
+                    window.addEventListener('mouseup', handleMouseUp);
+                }
+
+                return () => {
+                    window.removeEventListener('mousemove', handleMouseMove);
+                    window.removeEventListener('mouseup', handleMouseUp);
+                };
+            }, [resizing, resizeStart]);
+
+            // Drag handlers
+            const startDrag = (type, user, e) => {
+                let currentX, currentY;
+                
+                if (type === 'buddyList') {
+                    currentX = buddyListPos.x;
+                    currentY = buddyListPos.y;
+                } else if (type === 'chat') {
+                    currentX = chatPos.x;
+                    currentY = chatPos.y;
+                } else if (type === 'pm') {
+                    const pos = pmWindowPositions[user] || { x: 300, y: 80 };
+                    currentX = pos.x;
+                    currentY = pos.y;
+                }
+                
+                setDragging({ type, user });
+                setDragOffset({
+                    x: e.clientX - currentX,
+                    y: e.clientY - currentY
+                });
+            };
+
+            // Resize handlers
+            const startResize = (type, direction, user, e) => {
+                e.stopPropagation();
+                
+                let currentWidth, currentHeight;
+                
+                if (type === 'buddyList') {
+                    currentWidth = buddyListSize.width;
+                    currentHeight = buddyListSize.height;
+                } else if (type === 'chat') {
+                    currentWidth = chatSize.width;
+                    currentHeight = chatSize.height;
+                } else if (type === 'pm') {
+                    const size = pmWindowSizes[user] || { width: 400, height: 400 };
+                    currentWidth = size.width;
+                    currentHeight = size.height;
+                }
+                
+                setResizing({ type, direction, user });
+                setResizeStart({
+                    x: e.clientX,
+                    y: e.clientY,
+                    width: currentWidth,
+                    height: currentHeight
+                });
+            };
 
             // Listen for auth state changes
             useEffect(() => {
@@ -120,6 +278,9 @@
                         const userCredential = await auth.signInAnonymously();
                         const user = userCredential.user;
 
+                        // Save username to localStorage for persistence
+                        localStorage.setItem('bleepblorp_username', username);
+
                         setIsLoggedIn(true);
 
                         await db.collection("users").doc(user.uid).set({
@@ -143,16 +304,48 @@
                 }
             };
 
+            // Heartbeat to keep user marked as online
+            useEffect(() => {
+                if (!isLoggedIn || !authUser) return;
+
+                // Update lastSeen every 10 seconds
+                const heartbeat = setInterval(async () => {
+                    try {
+                        await db.collection("users").doc(authUser.uid).update({
+                            lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
+                            online: true,
+                        });
+                    } catch (error) {
+                        console.error("Heartbeat error:", error);
+                    }
+                }, 10000);
+
+                return () => clearInterval(heartbeat);
+            }, [isLoggedIn, authUser]);
+
             // Listen for online users
             useEffect(() => {
                 if (!isLoggedIn || !authUser) return;
 
                 const unsubscribe = db.collection("users").onSnapshot((snapshot) => {
+                    const now = Date.now();
                     const users = snapshot.docs
-                        .map((doc) => ({ id: doc.id, ...doc.data() }))
+                        .map((doc) => {
+                            const data = doc.data();
+                            const lastSeenTime = data.lastSeen?.toDate().getTime() || 0;
+                            const isActive = (now - lastSeenTime) < 30000; // Active if seen in last 30 seconds
+                            
+                            return { 
+                                id: doc.id, 
+                                username: data.username, 
+                                userId: data.userId,
+                                online: data.online && isActive 
+                            };
+                        })
                         .filter((user) => user.online)
-                        .map((user) => ({ username: user.username, userId: user.userId }));
-                    setOnlineUsers(users.map((u) => u.username));
+                        .map((user) => user.username);
+                    
+                    setOnlineUsers(users);
                 });
 
                 return () => unsubscribe();
@@ -250,10 +443,18 @@
                     }
                 };
 
+                // Multiple cleanup triggers for better reliability
                 window.addEventListener("beforeunload", cleanup);
+                window.addEventListener("unload", cleanup);
+                document.addEventListener("visibilitychange", () => {
+                    if (document.hidden) {
+                        cleanup();
+                    }
+                });
 
                 return () => {
                     window.removeEventListener("beforeunload", cleanup);
+                    window.removeEventListener("unload", cleanup);
                     cleanup();
                 };
             }, [isLoggedIn, authUser, username]);
@@ -586,6 +787,26 @@
                                 >
                                     Sign On
                                 </button>
+
+                                {localStorage.getItem('bleepblorp_username') && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            localStorage.removeItem('bleepblorp_username');
+                                            setUsername('');
+                                        }}
+                                        style={{
+                                            background: "#c0c0c0",
+                                            border: "2px outset #dfdfdf",
+                                            padding: "6px 16px",
+                                            fontFamily: '"MS Sans Serif", sans-serif',
+                                            fontSize: "11px",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        Clear Saved Name
+                                    </button>
+                                )}
                             </form>
 
                             <div style={{
@@ -594,7 +815,10 @@
                                 color: "#666",
                                 textAlign: "center",
                             }}>
-                                Enter the chat room and start messaging!
+                                {localStorage.getItem('bleepblorp_username') ? 
+                                    "Welcome back! Your username has been saved." :
+                                    "Enter the chat room and start messaging!"
+                                }
                             </div>
                         </div>
                     </div>
@@ -613,17 +837,20 @@
                     {buddyListOpen && (
                         <div style={{
                             position: "absolute",
-                            top: "50px",
-                            left: "50px",
-                            width: "250px",
+                            top: `${buddyListPos.y}px`,
+                            left: `${buddyListPos.x}px`,
+                            width: `${buddyListSize.width}px`,
+                            height: `${buddyListSize.height}px`,
                             background: "#c0c0c0",
                             border: "2px outset #dfdfdf",
                             display: "flex",
                             flexDirection: "column",
                             boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
-                            maxHeight: "calc(100vh - 100px)",
+                            userSelect: "none",
                         }}>
-                            <div style={{
+                            <div 
+                                onMouseDown={(e) => startDrag('buddyList', null, e)}
+                                style={{
                                 background: "linear-gradient(to right, #000080, #1084d0)",
                                 color: "white",
                                 padding: "3px 5px",
@@ -632,6 +859,7 @@
                                 alignItems: "center",
                                 fontWeight: "bold",
                                 fontSize: "11px",
+                                cursor: "move",
                             }}>
                                 <span>👥 Buddy List</span>
                                 <div>
@@ -644,6 +872,32 @@
                                     </span>
                                 </div>
                             </div>
+
+                            {/* Resize handles */}
+                            <div onMouseDown={(e) => startResize('buddyList', 'e', null, e)} style={{
+                                position: "absolute",
+                                right: "0",
+                                top: "0",
+                                bottom: "0",
+                                width: "4px",
+                                cursor: "ew-resize",
+                            }} />
+                            <div onMouseDown={(e) => startResize('buddyList', 's', null, e)} style={{
+                                position: "absolute",
+                                left: "0",
+                                right: "0",
+                                bottom: "0",
+                                height: "4px",
+                                cursor: "ns-resize",
+                            }} />
+                            <div onMouseDown={(e) => startResize('buddyList', 'se', null, e)} style={{
+                                position: "absolute",
+                                right: "0",
+                                bottom: "0",
+                                width: "12px",
+                                height: "12px",
+                                cursor: "nwse-resize",
+                            }} />
 
                             <div style={{
                                 display: "flex",
@@ -844,17 +1098,20 @@
                     {chatOpen && (
                         <div style={{
                             position: "absolute",
-                            top: "50px",
-                            right: "50px",
-                            width: "500px",
-                            height: "500px",
+                            top: `${chatPos.y}px`,
+                            left: `${chatPos.x}px`,
+                            width: `${chatSize.width}px`,
+                            height: `${chatSize.height}px`,
                             background: "#c0c0c0",
                             border: "2px outset #dfdfdf",
                             display: "flex",
                             flexDirection: "column",
                             boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                            userSelect: "none",
                         }}>
-                            <div style={{
+                            <div 
+                                onMouseDown={(e) => startDrag('chat', null, e)}
+                                style={{
                                 background: "linear-gradient(to right, #000080, #1084d0)",
                                 color: "white",
                                 padding: "3px 5px",
@@ -863,6 +1120,7 @@
                                 alignItems: "center",
                                 fontWeight: "bold",
                                 fontSize: "11px",
+                                cursor: "move",
                             }}>
                                 <span>💬 BleepBlorp Chat Room</span>
                                 <div>
@@ -875,6 +1133,32 @@
                                     </span>
                                 </div>
                             </div>
+
+                            {/* Resize handles */}
+                            <div onMouseDown={(e) => startResize('chat', 'e', null, e)} style={{
+                                position: "absolute",
+                                right: "0",
+                                top: "0",
+                                bottom: "0",
+                                width: "4px",
+                                cursor: "ew-resize",
+                            }} />
+                            <div onMouseDown={(e) => startResize('chat', 's', null, e)} style={{
+                                position: "absolute",
+                                left: "0",
+                                right: "0",
+                                bottom: "0",
+                                height: "4px",
+                                cursor: "ns-resize",
+                            }} />
+                            <div onMouseDown={(e) => startResize('chat', 'se', null, e)} style={{
+                                position: "absolute",
+                                right: "0",
+                                bottom: "0",
+                                width: "12px",
+                                height: "12px",
+                                cursor: "nwse-resize",
+                            }} />
 
                             <div style={{
                                 display: "flex",
@@ -893,8 +1177,7 @@
                                         fontSize: "11px",
                                         marginBottom: "8px",
                                         fontFamily: '"Courier New", monospace',
-                                        height: "400px",
-                                        maxHeight: "400px",
+                                        flex: 1,
                                     }}
                                 >
                                     {messages.map((msg, i) => (
@@ -973,24 +1256,30 @@
                     {Object.entries(pmWindows).map(([user, pmData], index) => {
                         if (!pmData.isOpen) return null;
 
+                        const pos = pmWindowPositions[user] || { x: 300 + index * 40, y: 80 + index * 40 };
+                        const size = pmWindowSizes[user] || { width: 400, height: 400 };
+
                         return (
                             <div
                                 key={user}
                                 style={{
                                     position: "absolute",
-                                    top: `${80 + index * 40}px`,
-                                    left: `${300 + index * 40}px`,
-                                    width: "400px",
-                                    height: "400px",
+                                    top: `${pos.y}px`,
+                                    left: `${pos.x}px`,
+                                    width: `${size.width}px`,
+                                    height: `${size.height}px`,
                                     background: "#c0c0c0",
                                     border: "2px outset #dfdfdf",
                                     display: "flex",
                                     flexDirection: "column",
                                     boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
                                     zIndex: 100 + index,
+                                    userSelect: "none",
                                 }}
                             >
-                                <div style={{
+                                <div 
+                                    onMouseDown={(e) => startDrag('pm', user, e)}
+                                    style={{
                                     background: "linear-gradient(to right, #000080, #1084d0)",
                                     color: "white",
                                     padding: "3px 5px",
@@ -1013,6 +1302,32 @@
                                     </div>
                                 </div>
 
+                                {/* Resize handles */}
+                                <div onMouseDown={(e) => startResize('pm', 'e', user, e)} style={{
+                                    position: "absolute",
+                                    right: "0",
+                                    top: "0",
+                                    bottom: "0",
+                                    width: "4px",
+                                    cursor: "ew-resize",
+                                }} />
+                                <div onMouseDown={(e) => startResize('pm', 's', user, e)} style={{
+                                    position: "absolute",
+                                    left: "0",
+                                    right: "0",
+                                    bottom: "0",
+                                    height: "4px",
+                                    cursor: "ns-resize",
+                                }} />
+                                <div onMouseDown={(e) => startResize('pm', 'se', user, e)} style={{
+                                    position: "absolute",
+                                    right: "0",
+                                    bottom: "0",
+                                    width: "12px",
+                                    height: "12px",
+                                    cursor: "nwse-resize",
+                                }} />
+
                                 <div style={{
                                     display: "flex",
                                     flexDirection: "column",
@@ -1030,8 +1345,7 @@
                                             fontSize: "11px",
                                             marginBottom: "8px",
                                             fontFamily: '"Courier New", monospace',
-                                            height: "280px",
-                                            maxHeight: "280px",
+                                            flex: 1,
                                         }}
                                     >
                                         {pmData.messages.map((msg, i) => (
