@@ -87,6 +87,44 @@
             // Resizing state
             const [resizing, setResizing] = useState(null);
             const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
+            
+            // Typing indicators
+            const [typingUsers, setTypingUsers] = useState([]);
+            const [pmTypingUsers, setPmTypingUsers] = useState({});
+            const typingTimeoutRef = useRef(null);
+            const pmTypingTimeoutsRef = useRef({});
+            
+            // Status and away
+            const [userStatus, setUserStatus] = useState('available');
+            const [customStatus, setCustomStatus] = useState('');
+            const [lastActivity, setLastActivity] = useState(Date.now());
+            const [showStatusPicker, setShowStatusPicker] = useState(false);
+            
+            // Emoticon picker
+            const [showEmoticonPicker, setShowEmoticonPicker] = useState(false);
+            const [activeInputField, setActiveInputField] = useState(null); // 'main' or PM username
+            
+            // Classic emoticons
+            const emoticons = [
+                { text: ':)', emoji: '😊', label: 'Happy' },
+                { text: ':(', emoji: '😞', label: 'Sad' },
+                { text: ':D', emoji: '😃', label: 'Big Smile' },
+                { text: ';)', emoji: '😉', label: 'Wink' },
+                { text: ':P', emoji: '😛', label: 'Tongue' },
+                { text: ':O', emoji: '😮', label: 'Surprised' },
+                { text: ':/', emoji: '😕', label: 'Confused' },
+                { text: ':|', emoji: '😐', label: 'Neutral' },
+                { text: 'B)', emoji: '😎', label: 'Cool' },
+                { text: ':*', emoji: '😘', label: 'Kiss' },
+                { text: '<3', emoji: '❤️', label: 'Heart' },
+                { text: '^_^', emoji: '😊', label: 'Happy' },
+                { text: '>:(', emoji: '😠', label: 'Angry' },
+                { text: ":'(", emoji: '😢', label: 'Crying' },
+                { text: 'XD', emoji: '😆', label: 'Laughing' },
+                { text: '-_-', emoji: '😑', label: 'Annoyed' },
+                { text: 'o_o', emoji: '😳', label: 'Shocked' },
+                { text: ':3', emoji: '😺', label: 'Cat face' },
+            ];
 
             // Update clock every second
             useEffect(() => {
@@ -287,6 +325,8 @@
                             userId: user.uid,
                             username: username,
                             online: true,
+                            status: 'available',
+                            customStatus: '',
                             lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
                         });
 
@@ -311,9 +351,14 @@
                 // Update lastSeen every 10 seconds
                 const heartbeat = setInterval(async () => {
                     try {
+                        const timeSinceActivity = Date.now() - lastActivity;
+                        const autoStatus = timeSinceActivity > 300000 ? 'away' : userStatus; // 5 min = away
+                        
                         await db.collection("users").doc(authUser.uid).update({
                             lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
                             online: true,
+                            status: autoStatus,
+                            customStatus: customStatus,
                         });
                     } catch (error) {
                         console.error("Heartbeat error:", error);
@@ -321,7 +366,27 @@
                 }, 10000);
 
                 return () => clearInterval(heartbeat);
-            }, [isLoggedIn, authUser]);
+            }, [isLoggedIn, authUser, lastActivity, userStatus, customStatus]);
+            
+            // Track user activity for auto-away
+            useEffect(() => {
+                const updateActivity = () => {
+                    setLastActivity(Date.now());
+                    if (userStatus === 'away') {
+                        setUserStatus('available');
+                    }
+                };
+                
+                window.addEventListener('mousemove', updateActivity);
+                window.addEventListener('keypress', updateActivity);
+                window.addEventListener('click', updateActivity);
+                
+                return () => {
+                    window.removeEventListener('mousemove', updateActivity);
+                    window.removeEventListener('keypress', updateActivity);
+                    window.removeEventListener('click', updateActivity);
+                };
+            }, [userStatus]);
 
             // Listen for online users
             useEffect(() => {
@@ -339,11 +404,12 @@
                                 id: doc.id, 
                                 username: data.username, 
                                 userId: data.userId,
-                                online: data.online && isActive 
+                                online: data.online && isActive,
+                                status: data.status || 'available',
+                                customStatus: data.customStatus || ''
                             };
                         })
-                        .filter((user) => user.online)
-                        .map((user) => user.username);
+                        .filter((user) => user.online);
                     
                     setOnlineUsers(users);
                 });
@@ -373,6 +439,23 @@
 
                 return () => unsubscribe();
             }, [isLoggedIn]);
+            
+            // Listen for typing indicators in main chat
+            useEffect(() => {
+                if (!isLoggedIn || !userId) return;
+
+                const unsubscribe = db.collection("typing")
+                    .where("room", "==", "main")
+                    .where("timestamp", ">", new Date(Date.now() - 5000))
+                    .onSnapshot((snapshot) => {
+                        const typers = snapshot.docs
+                            .map(doc => doc.data().username)
+                            .filter(name => name !== username);
+                        setTypingUsers(typers);
+                    });
+
+                return () => unsubscribe();
+            }, [isLoggedIn, userId, username]);
 
             // Listen for friend requests
             useEffect(() => {
@@ -463,10 +546,16 @@
                 e.preventDefault();
                 if (currentMessage.trim() && authUser) {
                     try {
+                        // Clear typing indicator
+                        if (typingTimeoutRef.current) {
+                            clearTimeout(typingTimeoutRef.current);
+                        }
+                        await db.collection("typing").doc(`${userId}_main`).delete().catch(() => {});
+                        
                         await db.collection("messages").add({
                             userId: authUser.uid,
                             user: username,
-                            text: currentMessage,
+                            text: convertEmoticons(currentMessage),
                             timestamp: firebase.firestore.FieldValue.serverTimestamp(),
                             isSystem: false,
                         });
@@ -474,6 +563,81 @@
                     } catch (error) {
                         console.error("Error sending message:", error);
                     }
+                }
+            };
+            
+            // Handle typing in main chat
+            const handleMainChatTyping = (value) => {
+                setCurrentMessage(value);
+                
+                // Update typing indicator
+                if (value.trim() && authUser) {
+                    db.collection("typing").doc(`${userId}_main`).set({
+                        userId: userId,
+                        username: username,
+                        room: "main",
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    }).catch(() => {});
+                    
+                    // Clear typing indicator after 3 seconds
+                    if (typingTimeoutRef.current) {
+                        clearTimeout(typingTimeoutRef.current);
+                    }
+                    typingTimeoutRef.current = setTimeout(() => {
+                        db.collection("typing").doc(`${userId}_main`).delete().catch(() => {});
+                    }, 3000);
+                }
+            };
+            
+            // Convert text emoticons to emoji
+            const convertEmoticons = (text) => {
+                let converted = text;
+                emoticons.forEach(emo => {
+                    const regex = new RegExp(emo.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+                    converted = converted.replace(regex, emo.emoji);
+                });
+                return converted;
+            };
+            
+            // Insert emoticon
+            const insertEmoticon = (emoji) => {
+                if (activeInputField === 'main') {
+                    setCurrentMessage(prev => prev + emoji);
+                } else if (activeInputField) {
+                    // It's a PM window
+                    setPmWindows(prev => ({
+                        ...prev,
+                        [activeInputField]: {
+                            ...prev[activeInputField],
+                            input: (prev[activeInputField]?.input || '') + emoji
+                        }
+                    }));
+                }
+                setShowEmoticonPicker(false);
+            };
+            
+            // Change status
+            const changeStatus = async (newStatus, newCustomStatus = '') => {
+                setUserStatus(newStatus);
+                setCustomStatus(newCustomStatus);
+                setShowStatusPicker(false);
+                
+                if (authUser) {
+                    await db.collection("users").doc(authUser.uid).update({
+                        status: newStatus,
+                        customStatus: newCustomStatus,
+                    });
+                }
+            };
+            
+            // Get status indicator
+            const getStatusIndicator = (status) => {
+                switch(status) {
+                    case 'available': return '🟢';
+                    case 'away': return '🟡';
+                    case 'busy': return '🔴';
+                    case 'invisible': return '⚫';
+                    default: return '🟢';
                 }
             };
 
@@ -688,6 +852,12 @@
                 if (!pmData || !pmData.input.trim() || !authUser) return;
 
                 try {
+                    // Clear typing indicator
+                    if (pmTypingTimeoutsRef.current[targetUsername]) {
+                        clearTimeout(pmTypingTimeoutsRef.current[targetUsername]);
+                    }
+                    await db.collection("typing").doc(`${userId}_pm_${targetUsername}`).delete().catch(() => {});
+                    
                     await db.collection("privateMessages")
                         .doc(pmData.conversationId)
                         .collection("messages")
@@ -696,7 +866,7 @@
                             fromUsername: username,
                             toId: pmData.targetUserId,
                             toUsername: targetUsername,
-                            text: pmData.input,
+                            text: convertEmoticons(pmData.input),
                             timestamp: firebase.firestore.FieldValue.serverTimestamp(),
                         });
 
@@ -714,6 +884,24 @@
                     ...prev,
                     [targetUsername]: { ...prev[targetUsername], input: value },
                 }));
+                
+                // Update typing indicator for PM
+                if (value.trim() && authUser) {
+                    db.collection("typing").doc(`${userId}_pm_${targetUsername}`).set({
+                        userId: userId,
+                        username: username,
+                        room: `pm_${targetUsername}`,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    }).catch(() => {});
+                    
+                    // Clear typing indicator after 3 seconds
+                    if (pmTypingTimeoutsRef.current[targetUsername]) {
+                        clearTimeout(pmTypingTimeoutsRef.current[targetUsername]);
+                    }
+                    pmTypingTimeoutsRef.current[targetUsername] = setTimeout(() => {
+                        db.collection("typing").doc(`${userId}_pm_${targetUsername}`).delete().catch(() => {});
+                    }, 3000);
+                }
             };
 
             if (!isLoggedIn) {
@@ -915,6 +1103,39 @@
                                 }}>
                                     <strong>Your Screen Name:</strong>
                                     <div style={{ color: "#cc0000", marginTop: "2px" }}>{username}</div>
+                                    <div style={{ 
+                                        marginTop: "5px", 
+                                        display: "flex", 
+                                        alignItems: "center",
+                                        gap: "5px",
+                                        fontSize: "10px"
+                                    }}>
+                                        <span>{getStatusIndicator(userStatus)}</span>
+                                        <span>{userStatus === 'available' ? 'Available' : userStatus === 'away' ? 'Away' : userStatus === 'busy' ? 'Busy' : 'Available'}</span>
+                                        <button
+                                            onClick={() => setShowStatusPicker(!showStatusPicker)}
+                                            style={{
+                                                background: "#c0c0c0",
+                                                border: "1px outset #dfdfdf",
+                                                padding: "2px 6px",
+                                                fontSize: "9px",
+                                                cursor: "pointer",
+                                                marginLeft: "auto",
+                                            }}
+                                        >
+                                            Change
+                                        </button>
+                                    </div>
+                                    {customStatus && (
+                                        <div style={{ 
+                                            marginTop: "3px", 
+                                            fontSize: "9px", 
+                                            color: "#666",
+                                            fontStyle: "italic"
+                                        }}>
+                                            "{customStatus}"
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div style={{
@@ -929,35 +1150,60 @@
                                             No friends yet
                                         </div>
                                     ) : (
-                                        friends.map((friend) => (
-                                            <div
-                                                key={friend}
-                                                style={{
-                                                    padding: "3px",
-                                                    marginTop: "3px",
-                                                    cursor: "pointer",
-                                                    display: "flex",
-                                                    justifyContent: "space-between",
-                                                    alignItems: "center",
-                                                }}
-                                            >
-                                                <span style={{ color: onlineUsers.includes(friend) ? "#0000cc" : "#999" }}>
-                                                    {onlineUsers.includes(friend) ? "🟢" : "⚫"} {friend}
-                                                </span>
-                                                <button
-                                                    onClick={() => openPMWindow(friend)}
+                                        friends.map((friend) => {
+                                            const friendData = onlineUsers.find(u => u.username === friend);
+                                            const isOnline = !!friendData;
+                                            const status = friendData?.status || 'available';
+                                            const customStat = friendData?.customStatus || '';
+                                            
+                                            return (
+                                                <div
+                                                    key={friend}
                                                     style={{
-                                                        background: "#c0c0c0",
-                                                        border: "1px outset #dfdfdf",
-                                                        padding: "2px 6px",
-                                                        fontSize: "9px",
+                                                        padding: "3px",
+                                                        marginTop: "3px",
                                                         cursor: "pointer",
                                                     }}
                                                 >
-                                                    MSG
-                                                </button>
-                                            </div>
-                                        ))
+                                                    <div style={{
+                                                        display: "flex",
+                                                        justifyContent: "space-between",
+                                                        alignItems: "center",
+                                                    }}>
+                                                        <span style={{ 
+                                                            color: isOnline ? "#0000cc" : "#999",
+                                                            display: "flex",
+                                                            alignItems: "center",
+                                                            gap: "3px"
+                                                        }}>
+                                                            {isOnline ? getStatusIndicator(status) : "⚫"} {friend}
+                                                        </span>
+                                                        <button
+                                                            onClick={() => openPMWindow(friend)}
+                                                            style={{
+                                                                background: "#c0c0c0",
+                                                                border: "1px outset #dfdfdf",
+                                                                padding: "2px 6px",
+                                                                fontSize: "9px",
+                                                                cursor: "pointer",
+                                                            }}
+                                                        >
+                                                            MSG
+                                                        </button>
+                                                    </div>
+                                                    {customStat && isOnline && (
+                                                        <div style={{ 
+                                                            fontSize: "8px", 
+                                                            color: "#666", 
+                                                            marginLeft: "15px",
+                                                            fontStyle: "italic"
+                                                        }}>
+                                                            "{customStat}"
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })
                                     )}
                                 </div>
 
@@ -1080,13 +1326,25 @@
                                     }}>
                                         {onlineUsers.map((user) => (
                                             <div
-                                                key={user}
+                                                key={user.username}
                                                 style={{
                                                     padding: "3px",
-                                                    color: user === username ? "#cc0000" : "#0000cc",
+                                                    color: user.username === username ? "#cc0000" : "#0000cc",
                                                 }}
                                             >
-                                                🟢 {user}
+                                                <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
+                                                    {getStatusIndicator(user.status)} {user.username}
+                                                </div>
+                                                {user.customStatus && (
+                                                    <div style={{ 
+                                                        fontSize: "8px", 
+                                                        color: "#666", 
+                                                        marginLeft: "15px",
+                                                        fontStyle: "italic"
+                                                    }}>
+                                                        "{user.customStatus}"
+                                                    </div>
+                                                )}
                                             </div>
                                         ))}
                                     </div>
@@ -1215,15 +1473,45 @@
                                         </div>
                                     ))}
                                 </div>
+                                {typingUsers.length > 0 && (
+                                    <div style={{
+                                        fontSize: "9px",
+                                        color: "#666",
+                                        fontStyle: "italic",
+                                        padding: "4px 8px",
+                                    }}>
+                                        {typingUsers.length === 1 
+                                            ? `${typingUsers[0]} is typing...` 
+                                            : `${typingUsers.join(', ')} are typing...`}
+                                    </div>
+                                )}
 
                                 <form
                                     onSubmit={handleSendMessage}
                                     style={{ display: "flex", gap: "5px" }}
                                 >
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setActiveInputField('main');
+                                            setShowEmoticonPicker(!showEmoticonPicker);
+                                        }}
+                                        style={{
+                                            background: "#c0c0c0",
+                                            border: "2px outset #dfdfdf",
+                                            padding: "4px 8px",
+                                            fontFamily: '"MS Sans Serif", sans-serif',
+                                            fontSize: "14px",
+                                            cursor: "pointer",
+                                        }}
+                                        title="Insert Emoticon"
+                                    >
+                                        😊
+                                    </button>
                                     <input
                                         type="text"
                                         value={currentMessage}
-                                        onChange={(e) => setCurrentMessage(e.target.value)}
+                                        onChange={(e) => handleMainChatTyping(e.target.value)}
                                         style={{
                                             flex: 1,
                                             padding: "4px",
@@ -1388,6 +1676,24 @@
                                         onSubmit={(e) => sendPMMessage(user, e)}
                                         style={{ display: "flex", gap: "5px" }}
                                     >
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setActiveInputField(user);
+                                                setShowEmoticonPicker(!showEmoticonPicker);
+                                            }}
+                                            style={{
+                                                background: "#c0c0c0",
+                                                border: "2px outset #dfdfdf",
+                                                padding: "4px 8px",
+                                                fontFamily: '"MS Sans Serif", sans-serif',
+                                                fontSize: "14px",
+                                                cursor: "pointer",
+                                            }}
+                                            title="Insert Emoticon"
+                                        >
+                                            😊
+                                        </button>
                                         <input
                                             type="text"
                                             value={pmData.input}
@@ -1421,6 +1727,156 @@
                             </div>
                         );
                     })}
+
+                    {/* Status Picker Popup */}
+                    {showStatusPicker && (
+                        <div style={{
+                            position: "absolute",
+                            top: "50%",
+                            left: "50%",
+                            transform: "translate(-50%, -50%)",
+                            width: "300px",
+                            background: "#c0c0c0",
+                            border: "2px outset #dfdfdf",
+                            boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                            zIndex: 1000,
+                        }}>
+                            <div style={{
+                                background: "linear-gradient(to right, #000080, #1084d0)",
+                                color: "white",
+                                padding: "3px 5px",
+                                fontWeight: "bold",
+                                fontSize: "11px",
+                                display: "flex",
+                                justifyContent: "space-between",
+                            }}>
+                                <span>Change Status</span>
+                                <span
+                                    style={{ cursor: "pointer", fontSize: "16px" }}
+                                    onClick={() => setShowStatusPicker(false)}
+                                >
+                                    ✕
+                                </span>
+                            </div>
+                            <div style={{ padding: "10px" }}>
+                                <div style={{ marginBottom: "10px" }}>
+                                    {['available', 'away', 'busy'].map(status => (
+                                        <button
+                                            key={status}
+                                            onClick={() => changeStatus(status, '')}
+                                            style={{
+                                                display: "block",
+                                                width: "100%",
+                                                background: "#c0c0c0",
+                                                border: "2px outset #dfdfdf",
+                                                padding: "5px",
+                                                marginBottom: "5px",
+                                                fontSize: "11px",
+                                                cursor: "pointer",
+                                                textAlign: "left",
+                                            }}
+                                        >
+                                            {getStatusIndicator(status)} {status.charAt(0).toUpperCase() + status.slice(1)}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div style={{ borderTop: "1px solid #999", paddingTop: "10px" }}>
+                                    <label style={{ fontSize: "10px", display: "block", marginBottom: "5px" }}>
+                                        Custom Status Message:
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={customStatus}
+                                        onChange={(e) => setCustomStatus(e.target.value)}
+                                        placeholder="What's on your mind?"
+                                        style={{
+                                            width: "100%",
+                                            padding: "4px",
+                                            border: "2px inset #dfdfdf",
+                                            fontSize: "10px",
+                                            marginBottom: "5px",
+                                        }}
+                                    />
+                                    <button
+                                        onClick={() => changeStatus(userStatus, customStatus)}
+                                        style={{
+                                            width: "100%",
+                                            background: "#c0c0c0",
+                                            border: "2px outset #dfdfdf",
+                                            padding: "5px",
+                                            fontSize: "10px",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        Save Status Message
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Emoticon Picker Popup */}
+                    {showEmoticonPicker && (
+                        <div style={{
+                            position: "absolute",
+                            top: "50%",
+                            left: "50%",
+                            transform: "translate(-50%, -50%)",
+                            width: "350px",
+                            background: "#c0c0c0",
+                            border: "2px outset #dfdfdf",
+                            boxShadow: "4px 4px 10px rgba(0,0,0,0.5)",
+                            zIndex: 1000,
+                        }}>
+                            <div style={{
+                                background: "linear-gradient(to right, #000080, #1084d0)",
+                                color: "white",
+                                padding: "3px 5px",
+                                fontWeight: "bold",
+                                fontSize: "11px",
+                                display: "flex",
+                                justifyContent: "space-between",
+                            }}>
+                                <span>😊 Insert Emoticon</span>
+                                <span
+                                    style={{ cursor: "pointer", fontSize: "16px" }}
+                                    onClick={() => setShowEmoticonPicker(false)}
+                                >
+                                    ✕
+                                </span>
+                            </div>
+                            <div style={{
+                                padding: "10px",
+                                display: "grid",
+                                gridTemplateColumns: "repeat(4, 1fr)",
+                                gap: "5px",
+                                maxHeight: "300px",
+                                overflowY: "auto",
+                            }}>
+                                {emoticons.map((emo, i) => (
+                                    <button
+                                        key={i}
+                                        onClick={() => insertEmoticon(emo.emoji)}
+                                        style={{
+                                            background: "#c0c0c0",
+                                            border: "2px outset #dfdfdf",
+                                            padding: "10px",
+                                            fontSize: "20px",
+                                            cursor: "pointer",
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            alignItems: "center",
+                                            gap: "3px",
+                                        }}
+                                        title={emo.label}
+                                    >
+                                        <span>{emo.emoji}</span>
+                                        <span style={{ fontSize: "8px", color: "#666" }}>{emo.text}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
 
                     {/* Taskbar */}
                     <div style={{
@@ -1529,3 +1985,4 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </body>
 </html>
+
